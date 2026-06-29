@@ -1,0 +1,28 @@
+{
+  "name": "nextrade-server",
+  "version": "1.0.0",
+  "description": "NexTrade trading terminal backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "pm2": "pm2 start index.js --name nextrade-server"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "axios-cookiejar-support": "^4.0.7",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.10",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "ioredis": "^5.3.2",
+    "mongoose": "^8.0.3",
+    "node-cron": "^3.0.3",
+    "pm2": "^5.3.0",
+    "socket.io": "^4.6.1",
+    "tough-cookie": "^4.1.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
