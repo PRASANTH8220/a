@@ -168,7 +168,7 @@ async function runBackfill(force = false) {
     }
 
     // Rate limit: 500ms between requests
-    await sleep(500);
+    await sleep(100);
   }
 
   // Backfill indices

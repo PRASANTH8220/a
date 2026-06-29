@@ -4,6 +4,7 @@ import { useChartStore } from '../../store/useChartStore';
 import { useMarketStore } from '../../store/useMarketStore';
 import { useOrderStore } from '../../store/useOrderStore';
 import ChartToolbar from './ChartToolbar';
+import TVFallbackChart from './TVFallbackChart';
 
 const TIMEFRAMES = ['1min', '5min', '15min', '1hr', '1D'];
 const TF_LABELS = { '1min': '1m', '5min': '5m', '15min': '15m', '1hr': '1H', '1D': '1D' };
@@ -333,9 +334,8 @@ export default function Chart() {
           </div>
         )}
         {!isLoading && candles.length === 0 && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-text-secondary">
-            <span className="text-sm">No chart data available</span>
-            <span className="text-xs">Data will appear once the market opens and the poller starts</span>
+          <div className="absolute inset-0">
+            <TVFallbackChart symbol={symbol} timeframe={timeframe} />
           </div>
         )}
         {intraday && serverStartDate && (

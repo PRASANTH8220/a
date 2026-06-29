@@ -34,9 +34,7 @@ function MiniBarChart({ data, valueKey = 'pnl', height = 80 }) {
   );
 }
 
-// Inline recharts import — falls back to simple SVG if not available
-let charts = null;
-try { charts = { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine }; } catch {}
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 function StatCard({ label, value, color }) {
   return (

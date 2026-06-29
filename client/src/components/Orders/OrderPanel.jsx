@@ -5,6 +5,39 @@ import { useMarketStore } from '../../store/useMarketStore';
 
 const LOT_SIZES = { NIFTY: 75, BANKNIFTY: 30, 'NIFTY MIDCAP SELECT': 120 };
 
+const FNO_SET = new Set([
+  'AARTIIND','ABB','ABBOTINDIA','ABCAPITAL','ABFRL','ACC','ADANIENT','ADANIPORTS','ALKEM',
+  'AMBUJACEM','APOLLOHOSP','APOLLOTYRE','ASHOKLEY','ASIANPAINT','ASTRAL','AUROPHARMA',
+  'AXISBANK','BAJAJ-AUTO','BAJAJFINSV','BAJFINANCE','BALKRISIND','BANDHANBNK','BANKBARODA',
+  'BATAINDIA','BEL','BERGEPAINT','BHARTIARTL','BHEL','BIOCON','BOSCHLTD','BPCL','BRITANNIA',
+  'BSOFT','CANBK','CANFINHOME','CDSL','CESC','CGPOWER','CHAMBLFERT','CHOLAFIN','CIPLA',
+  'COALINDIA','COFORGE','COLPAL','CONCOR','CROMPTON','CUMMINSIND','CYIENT','DABUR','DEEPAKNTR',
+  'DELTACORP','DELHIVERY','DIVISLAB','DIXON','DLF','DMART','DRREDDY','EICHERMOT','EMAMILTD',
+  'ENDURANCE','ESCORTS','EXIDEIND','FACT','FEDERALBNK','FORTIS','GAIL','GLENMARK','GMRAIRPORT',
+  'GNFC','GODREJCP','GODREJPROP','GRANULES','GRASIM','GSFC','HAPPSTMNDS','HAVELLS','HCLTECH',
+  'HDFCBANK','HDFCLIFE','HEROMOTOCO','HINDALCO','HINDCOPPER','HINDPETRO','HINDUNILVR',
+  'ICICIBANK','ICICIPRULI','IDFCFIRSTB','IEX','IGL','INDHOTEL','INDIAMART','INDUSINDBK',
+  'INDUSTOWER','INFY','INTELLECT','IOC','IPCALAB','IRB','IRCTC','ITC','JINDALSTEL','JIOFIN',
+  'JKCEMENT','JSWSTEEL','JUBFOOD','KOTAKBANK','KRBL','LAURUSLABS','LICHSGFIN','LICI','LT',
+  'LTIM','LTTS','LUPIN','M&M','MANAPPURAM','MARICO','MARUTI','MCX','METROPOLIS','MGL',
+  'MOTHERSON','MPHASIS','NATIONALUM','NAUKRI','NBCC','NCC','NESTLEIND','NHPC','NMDC','NTPC',
+  'OBEROIRLTY','OFSS','ONGC','PAGEIND','PERSISTENT','PETRONET','PFIZER','PHOENIXLTD','PIIND',
+  'POLYCAB','POONAWALLA','POWERGRID','PNB','PRAJIND','PRESTIGE','PVRINOX','RAMCOCEM','RECLTD',
+  'RELIANCE','RVNL','SAIL','SBICARD','SBILIFE','SBIN','SHRIRAMFIN','SIEMENS','SRF','STAR',
+  'SUNPHARMA','SYNGENE','TATACHEM','TATACOMM','TATACONSUM','TATAELXSI','TATAMOTORS','TATAPOWER',
+  'TATASTEEL','TCS','TECHM','TITAN','TORNTPHARM','TORNTPOWER','TRENT','TRIDENT','ULTRACEMCO',
+  'UPL','VEDL','VOLTAS','WIPRO','YESBANK','ZOMATO','ZYDUSLIFE',
+  'NIFTY','BANKNIFTY','NIFTY MIDCAP SELECT','SENSEX',
+]);
+
+function calcMargin(symbol, qty, price, product, optionType) {
+  const orderValue = qty * price;
+  if (product === 'NRML') return { margin: orderValue, leverage: 1, label: 'Full Value' };
+  const isFnO = FNO_SET.has(symbol) && optionType && optionType !== 'EQ';
+  if (isFnO) return { margin: orderValue, leverage: 1, label: 'Full Premium' };
+  return { margin: orderValue * 0.2, leverage: 5, label: '5x Leverage' };
+}
+
 export default function OrderPanel() {
   const { orderPanel, updateOrderPanel, closeOrderPanel, placeOrder, account, refreshAccount } = useOrderStore();
   const tick = useMarketStore(s => s.ticks[orderPanel.symbol]);
@@ -17,7 +50,12 @@ export default function OrderPanel() {
   const lotSize = LOT_SIZES[orderPanel.symbol] || 1;
   const ltp = tick?.ltp || 0;
   const price = orderPanel.orderType === 'MARKET' ? ltp : parseFloat(orderPanel.limitPrice) || ltp;
-  const marginRequired = price * (orderPanel.qty * lotSize) * (orderPanel.product === 'MIS' ? 0.2 : 1);
+  const optionType = orderPanel.optionType || 'EQ';
+  const isFnO = FNO_SET.has(orderPanel.symbol);
+  const segmentLabel = isFnO ? 'F&O' : 'EQ';
+  const { margin: marginRequired, leverage, label: leverageLabel } = calcMargin(
+    orderPanel.symbol, orderPanel.qty * lotSize, price, orderPanel.product, optionType
+  );
 
   const handleSubmit = async () => {
     setLoading(true);
@@ -136,6 +174,21 @@ export default function OrderPanel() {
 
         {/* Margin */}
         <div className="bg-card rounded-lg p-3 space-y-1.5">
+          <div className="flex justify-between text-xs mb-1">
+            <span className="text-text-secondary">Segment</span>
+            <span className="flex items-center gap-1.5">
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${isFnO ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'}`}>{segmentLabel}</span>
+              {orderPanel.product === 'MIS' && (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-yellow-500/20 text-yellow-400">{leverageLabel}</span>
+              )}
+            </span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-text-secondary">Order Value</span>
+            <span className="tabular-nums text-text-secondary">
+              ₹{(price * orderPanel.qty * lotSize).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+            </span>
+          </div>
           <div className="flex justify-between text-xs">
             <span className="text-text-secondary">Margin Required</span>
             <span className={`tabular-nums font-semibold ${canAfford ? 'text-text-primary' : 'text-down'}`}>

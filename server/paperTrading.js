@@ -83,17 +83,45 @@ async function getAccount(sessionId = 'default') {
   };
 }
 
+// F&O eligible symbols (indices are always F&O)
+const FNO_SET = new Set([
+  'AARTIIND','ABB','ABBOTINDIA','ABCAPITAL','ABFRL','ACC','ADANIENT','ADANIPORTS','ALKEM',
+  'AMBUJACEM','APOLLOHOSP','APOLLOTYRE','ASHOKLEY','ASIANPAINT','ASTRAL','AUROPHARMA',
+  'AXISBANK','BAJAJ-AUTO','BAJAJFINSV','BAJFINANCE','BALKRISIND','BANDHANBNK','BANKBARODA',
+  'BATAINDIA','BEL','BERGEPAINT','BHARTIARTL','BHEL','BIOCON','BOSCHLTD','BPCL','BRITANNIA',
+  'BSOFT','CANBK','CANFINHOME','CDSL','CESC','CGPOWER','CHAMBLFERT','CHOLAFIN','CIPLA',
+  'COALINDIA','COFORGE','COLPAL','CONCOR','CROMPTON','CUMMINSIND','CYIENT','DABUR','DEEPAKNTR',
+  'DELTACORP','DELHIVERY','DIVISLAB','DIXON','DLF','DMART','DRREDDY','EICHERMOT','EMAMILTD',
+  'ENDURANCE','ESCORTS','EXIDEIND','FACT','FEDERALBNK','FORTIS','GAIL','GLENMARK','GMRAIRPORT',
+  'GNFC','GODREJCP','GODREJPROP','GRANULES','GRASIM','GSFC','HAPPSTMNDS','HAVELLS','HCLTECH',
+  'HDFCBANK','HDFCLIFE','HEROMOTOCO','HINDALCO','HINDCOPPER','HINDPETRO','HINDUNILVR',
+  'ICICIBANK','ICICIPRULI','IDFCFIRSTB','IEX','IGL','INDHOTEL','INDIAMART','INDUSINDBK',
+  'INDUSTOWER','INFY','INTELLECT','IOC','IPCALAB','IRB','IRCTC','ITC','JINDALSTEL','JIOFIN',
+  'JKCEMENT','JSWSTEEL','JUBFOOD','KOTAKBANK','KRBL','LAURUSLABS','LICHSGFIN','LICI','LT',
+  'LTIM','LTTS','LUPIN','M&M','MANAPPURAM','MARICO','MARUTI','MCX','METROPOLIS','MGL',
+  'MOTHERSON','MPHASIS','NATIONALUM','NAUKRI','NBCC','NCC','NESTLEIND','NHPC','NMDC','NTPC',
+  'OBEROIRLTY','OFSS','ONGC','PAGEIND','PERSISTENT','PETRONET','PFIZER','PHOENIXLTD','PIIND',
+  'POLYCAB','POONAWALLA','POWERGRID','PNB','PRAJIND','PRESTIGE','PVRINOX','RAMCOCEM','RECLTD',
+  'RELIANCE','RVNL','SAIL','SBICARD','SBILIFE','SBIN','SHRIRAMFIN','SIEMENS','SRF','STAR',
+  'SUNPHARMA','SYNGENE','TATACHEM','TATACOMM','TATACONSUM','TATAELXSI','TATAMOTORS','TATAPOWER',
+  'TATASTEEL','TCS','TECHM','TITAN','TORNTPHARM','TORNTPOWER','TRENT','TRIDENT','ULTRACEMCO',
+  'UPL','VEDL','VOLTAS','WIPRO','YESBANK','ZOMATO','ZYDUSLIFE',
+  'NIFTY','BANKNIFTY','NIFTY MIDCAP SELECT','SENSEX',
+]);
+
 /**
- * Estimate margin required for an order
+ * Margin rules:
+ *  NRML          → full order value (no leverage)
+ *  MIS + F&O     → full premium (options are already leveraged instruments)
+ *  MIS + Equity  → 5x leverage = 20% margin
  */
-function estimateMargin(symbol, qty, price, orderType, product) {
-  // Simplified margin calculation
-  // For options: full premium
-  // For equity MIS: 20% of order value
-  // For equity NRML: 100% of order value
+function estimateMargin(symbol, qty, price, orderType, product, optionType) {
   const orderValue = qty * price;
-  if (product === 'MIS') return orderValue * 0.2;
-  return orderValue;
+  if (product === 'NRML') return orderValue;
+  // MIS intraday
+  const isFnO = FNO_SET.has(symbol) && optionType && optionType !== 'EQ';
+  if (isFnO) return orderValue; // options: full premium
+  return orderValue * 0.2;       // equity MIS: 5x leverage
 }
 
 /**
@@ -103,7 +131,7 @@ async function placeOrder({ sessionId = 'default', symbol, expiry, strike, optio
   const account = await getOrCreateAccount(sessionId);
   const actualQty = qty * (lotSize || 1);
   const price = orderType === 'MARKET' ? currentLTP : limitPrice || currentLTP;
-  const marginRequired = estimateMargin(symbol, actualQty, price, orderType, product);
+  const marginRequired = estimateMargin(symbol, actualQty, price, orderType, product, optionType);
 
   if (marginRequired > account.availableBalance) {
     return { success: false, error: `Insufficient balance. Required: ₹${marginRequired.toFixed(2)}, Available: ₹${account.availableBalance.toFixed(2)}` };
