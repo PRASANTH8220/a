@@ -124,3 +124,43 @@ pm2 save
 **Backend:** Node.js, Express, Socket.IO, Redis (ioredis), MongoDB (Mongoose), axios, tough-cookie, node-cron
 
 **Frontend:** React 18, Vite, Lightweight Charts v4, Zustand, Tailwind CSS v3, Socket.IO client, Recharts, Framer Motion, Lucide React
+
+---
+
+## Changelog — Recent Changes
+
+### 1. LTP available even when the market is closed
+
+Previously, LTP only existed in an in-memory cache populated by the live poller (9:00–15:31 IST). Outside that window — after hours, weekends, holidays, or right after a fresh server restart — `/api/quote/:symbol` simply returned 404.
+
+`GET /api/quote/:symbol` now falls back through three tiers:
+
+1. **Live tick** — in-memory cache from the active poller (market open).
+2. **On-demand NSE snapshot** — a one-off fetch straight from NSE's quote APIs (`quote-equity`, `allIndices`), which keep returning the last traded price even when the market is shut. The NSE cookie session already refreshes every 25 minutes around the clock, so this works any time of day.
+3. **Last stored daily close** — pulled from MongoDB's `1D` candles, as a fully offline fallback.
+
+The response includes a `source` field (`live` / `nse_snapshot` / `last_close`) so the UI can show a "last close" badge when the price isn't live. This same fallback chain now also prices paper-trading orders (`/api/paper/order`, `/api/paper/close`), so trades can still be placed/closed using last-close pricing when the market is closed.
+
+### 2. Dedicated "Stocks (Nifty 500)" section
+
+The old Watchlist mixed Nifty 500, F&O, and indices into one search-to-add list with no way to just browse stocks. Added a new **Stocks tab** in the sidebar (`client/src/components/Stocks/StocksList.jsx`):
+
+- Browses the full Nifty 500 universe, separate from your personal watchlist.
+- Toggle between **All 500** and **F&O Only**.
+- Search box to filter by symbol.
+- Live LTP per row (using the same closed-market fallback above), with inline Buy/Sell.
+
+### 3. F&O stocks: intraday buy/sell *and* options
+
+Equity intraday buy/sell already worked for any symbol generically. The real gap was that **options couldn't be traded from the UI at all** — the option chain table was read-only, and it only ever showed index chains (NIFTY/BANKNIFTY/NIFTY MIDCAP SELECT), silently falling back to NIFTY even when a stock with its own F&O contracts was selected.
+
+- `poller.js` now also rotates through the F&O stock list, polling NSE's `option-chain-equities` endpoint (one stock every 1.5s — too many symbols to refresh at 1s like the indices).
+- The Option Chain panel now shows a stock's **own** chain whenever it has F&O contracts, with a visible note when it falls back to NIFTY.
+- CE/PE LTP cells have hover Buy/Sell buttons that open the order panel pre-filled with the correct strike, expiry, and option type.
+- Orders now carry `optionType` / `strike` / `expiry` end-to-end, and option orders are priced off the option's own premium (not the underlying stock's price).
+
+**Note:** Stock F&O lot sizes vary by symbol and are revised by NSE quarterly, so they aren't hardcoded — the order panel defaults to 1 and shows a note instead of guessing a number that could go stale.
+
+### Files touched
+
+`client/src/App.jsx` · `client/src/components/Layout/Sidebar.jsx` · `client/src/components/MarketWatch/MarketWatch.jsx` · `client/src/components/OptionChain/OptionChain.jsx` · `client/src/components/Orders/OrderPanel.jsx` · `client/src/components/Stocks/StocksList.jsx` (new) · `client/src/store/useOrderStore.js` · `server/index.js` · `server/poller.js`
