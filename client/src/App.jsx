@@ -113,15 +113,19 @@ export default function App() {
         {/* Sidebar */}
         <Sidebar />
 
-        {/* Center: Chart + Option Chain */}
+        {/* Center: Chart takes full height */}
         <div className="flex flex-col flex-1 overflow-hidden min-w-0">
-          <Chart />
-          <OptionChain />
+          <Chart key={symbol} />
         </div>
 
-        {/* Right: Order Panel */}
-        <div className="w-80 flex-shrink-0 border-l border-border overflow-hidden">
-          <OrderPanel />
+        {/* Right panel: Option Chain (top, scrollable) + Order Panel (bottom) */}
+        <div className="flex flex-col w-80 flex-shrink-0 border-l border-border overflow-hidden">
+          <div className="flex-1 overflow-hidden min-h-0">
+            <OptionChain />
+          </div>
+          <div className="border-t border-border flex-shrink-0" style={{ height: '52%' }}>
+            <OrderPanel />
+          </div>
         </div>
       </div>
 

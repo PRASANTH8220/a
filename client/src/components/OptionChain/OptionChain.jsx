@@ -116,10 +116,15 @@ export default function OptionChain() {
   }, [chainData?.expiryDates?.[0]]);
 
   if (!chainData) return (
-    <div className="border-t border-border bg-surface px-4 py-3">
-      <div className="flex items-center gap-2 text-text-secondary text-xs">
-        <div className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-        Waiting for option chain data{isStockChain ? ` (${chainSymbol} — stock chains refresh in rotation, can take a bit longer than indices)` : ''}...
+    <div className="bg-surface h-full flex flex-col">
+      <div className="flex items-center justify-between px-4 py-1.5 border-b border-border">
+        <span className="text-xs font-semibold text-text-primary">Option Chain — {chainSymbol}</span>
+      </div>
+      <div className="flex-1 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-2 text-text-secondary text-xs text-center px-4">
+          <div className="w-4 h-4 rounded-full border-2 border-accent border-t-transparent animate-spin" />
+          Waiting for option chain data{isStockChain ? `\n(${chainSymbol} stock chains take a bit longer)` : ''}...
+        </div>
       </div>
     </div>
   );
@@ -140,7 +145,7 @@ export default function OptionChain() {
     openOrderPanel(chainSymbol, side, { optionType, strike, expiry });
 
   return (
-    <div className="border-t border-border bg-surface flex-shrink-0" style={{ maxHeight: collapsed ? 40 : 220 }}>
+    <div className="bg-surface flex flex-col h-full overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-1.5 border-b border-border">
         <div className="flex items-center gap-3">
@@ -172,7 +177,7 @@ export default function OptionChain() {
       )}
 
       {!collapsed && (
-        <div className="overflow-auto" style={{ maxHeight: 176 }}>
+        <div className="flex-1 overflow-auto min-h-0">
           <table className="w-full text-xs border-collapse">
             <thead className="sticky top-0 bg-surface z-10">
               <tr className="border-b border-border">

@@ -78,13 +78,24 @@ app.get('/api/candles/:symbol/:timeframe', async (req, res) => {
     const { symbol, timeframe } = req.params;
     const limit = parseInt(req.query.limit) || 200;
     const before = req.query.before || null;
+    const INTRADAY = ['1min', '5min', '15min', '1hr'];
+
     let candles = await getCandles(symbol, timeframe, limit, before);
 
-    // Fallback: DB empty (market closed/first run) -> TradingView public UDF
+    // For intraday timeframes, only serve candles from today (IST).
+    // Stale candles from previous sessions are useless — always fetch live.
+    if (INTRADAY.includes(timeframe) && candles.length) {
+      const todayIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      todayIST.setHours(0, 0, 0, 0);
+      const todayMs = todayIST.getTime();
+      candles = candles.filter(c => c.time >= todayMs);
+    }
+
+    // Fallback: DB empty / intraday has no today data -> fetch live from NSE/Yahoo
     if (!candles.length && !before) {
-      console.log(`[Candles] DB empty for ${symbol}/${timeframe}, fetching from TradingView...`);
+      console.log(`[Candles] DB empty for ${symbol}/${timeframe}, fetching live...`);
       try { candles = await fetchFromNSE(symbol, timeframe, limit); }
-      catch (tvErr) { console.error('[Candles] TV fallback failed:', tvErr.message); }
+      catch (tvErr) { console.error('[Candles] Live fallback failed:', tvErr.message); }
     }
 
     res.json({ candles, serverStartDate: process.env.SERVER_START_DATE || new Date().toISOString() });

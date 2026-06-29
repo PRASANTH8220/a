@@ -159,6 +159,36 @@ async function pollEquityIndex(indexParam) {
  */
 async function fetchSnapshotQuote(symbol) {
   const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'NIFTY MIDCAP SELECT'];
+  const YAHOO_INDEX_MAP = {
+    'NIFTY': '^NSEI',
+    'BANKNIFTY': '^NSEBANK',
+    'NIFTY MIDCAP SELECT': 'NIFTY_MID_SELECT.NS',
+    'SENSEX': '^BSESN',
+  };
+
+  // Helper: fetch LTP from Yahoo Finance (no cookies needed)
+  async function fetchFromYahoo(sym) {
+    const yahooSym = YAHOO_INDEX_MAP[sym] || `${sym}.NS`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1d&range=1d`;
+    const resp = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+      timeout: 8000,
+    });
+    const meta = resp.data?.chart?.result?.[0]?.meta;
+    if (!meta?.regularMarketPrice) return null;
+    return {
+      symbol: sym,
+      ltp: parseFloat(meta.regularMarketPrice.toFixed(2)),
+      open: parseFloat((meta.regularMarketOpen || 0).toFixed(2)),
+      high: parseFloat((meta.regularMarketDayHigh || 0).toFixed(2)),
+      low: parseFloat((meta.regularMarketDayLow || 0).toFixed(2)),
+      volume: parseInt(meta.regularMarketVolume || 0),
+      oi: 0,
+      timestamp: Date.now(),
+      source: 'yahoo',
+    };
+  }
+
   try {
     if (INDEX_SYMBOLS.includes(symbol)) {
       const url = 'https://www.nseindia.com/api/allIndices';
@@ -169,53 +199,63 @@ async function fetchSnapshotQuote(symbol) {
       });
       if (isCookieDead(response)) {
         await refreshCookies();
-        return null;
+        // Fall through to Yahoo below
+      } else {
+        const row = (response.data?.data || []).find(
+          r => r.index === symbol || r.indexSymbol === symbol
+        );
+        if (row) {
+          const ltp = parseFloat(row.last || row.lastPrice || 0);
+          if (ltp) return {
+            symbol,
+            ltp,
+            open: parseFloat(row.open || 0),
+            high: parseFloat(row.high || row.dayHigh || 0),
+            low: parseFloat(row.low || row.dayLow || 0),
+            volume: 0,
+            oi: 0,
+            timestamp: Date.now(),
+          };
+        }
       }
-      const row = (response.data?.data || []).find(
-        r => r.index === symbol || r.indexSymbol === symbol
-      );
-      if (!row) return null;
-      const ltp = parseFloat(row.last || row.lastPrice || 0);
-      if (!ltp) return null;
-      return {
-        symbol,
-        ltp,
-        open: parseFloat(row.open || 0),
-        high: parseFloat(row.high || row.dayHigh || 0),
-        low: parseFloat(row.low || row.dayLow || 0),
-        volume: 0,
-        oi: 0,
-        timestamp: Date.now(),
-      };
+    } else {
+      const url = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`;
+      const response = await axios.get(url, {
+        headers: getHeaders(),
+        timeout: 8000,
+        validateStatus: () => true,
+      });
+      if (isCookieDead(response)) {
+        await refreshCookies();
+        // Fall through to Yahoo below
+      } else {
+        const priceInfo = response.data?.priceInfo || {};
+        const ltp = parseFloat(priceInfo.lastPrice || priceInfo.close || 0);
+        if (ltp) return {
+          symbol,
+          ltp,
+          open: parseFloat(priceInfo.open || 0),
+          high: parseFloat(priceInfo.intraDayHighLow?.max || priceInfo.weekHighLow?.max || 0),
+          low: parseFloat(priceInfo.intraDayHighLow?.min || priceInfo.weekHighLow?.min || 0),
+          volume: parseInt(response.data?.securityWiseDP?.quantityTraded || 0),
+          oi: 0,
+          timestamp: Date.now(),
+        };
+      }
     }
-
-    const url = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`;
-    const response = await axios.get(url, {
-      headers: getHeaders(),
-      timeout: 8000,
-      validateStatus: () => true,
-    });
-    if (isCookieDead(response)) {
-      await refreshCookies();
-      return null;
-    }
-    const priceInfo = response.data?.priceInfo || {};
-    const ltp = parseFloat(priceInfo.lastPrice || priceInfo.close || 0);
-    if (!ltp) return null;
-    return {
-      symbol,
-      ltp,
-      open: parseFloat(priceInfo.open || 0),
-      high: parseFloat(priceInfo.intraDayHighLow?.max || priceInfo.weekHighLow?.max || 0),
-      low: parseFloat(priceInfo.intraDayHighLow?.min || priceInfo.weekHighLow?.min || 0),
-      volume: parseInt(response.data?.securityWiseDP?.quantityTraded || 0),
-      oi: 0,
-      timestamp: Date.now(),
-    };
   } catch (err) {
-    console.error(`[Poller] Snapshot fetch failed for ${symbol}:`, err.message);
-    return null;
+    console.warn(`[Poller] NSE snapshot failed for ${symbol} (${err.message}), trying Yahoo...`);
   }
+
+  // Yahoo fallback — works without cookies, no IP blocking
+  try {
+    const yahooData = await fetchFromYahoo(symbol);
+    if (yahooData) return yahooData;
+  } catch (err) {
+    console.error(`[Poller] Yahoo snapshot also failed for ${symbol}: ${err.message}`);
+  }
+
+  return null;
 }
 
 /**

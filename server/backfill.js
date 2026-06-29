@@ -82,6 +82,80 @@ async function fetchIndexHistory(indexName, fromDate, toDate) {
 }
 
 /**
+ * Fetch daily OHLCV from Yahoo Finance (no cookies needed — used as NSE fallback)
+ * Yahoo symbol format: RELIANCE.NS, ^NSEI (Nifty), ^NSEBANK (BankNifty)
+ */
+const YAHOO_INDEX_MAP = {
+  'NIFTY': '^NSEI',
+  'BANKNIFTY': '^NSEBANK',
+  'NIFTY MIDCAP SELECT': 'NIFTY_MID_SELECT.NS',
+  'SENSEX': '^BSESN',
+};
+
+// Equity overrides for symbols that don't follow the simple SYMBOL.NS pattern
+const YAHOO_EQUITY_OVERRIDES = {
+  'M&M':        'M%26M.NS',
+  'BAJAJ-AUTO': 'BAJAJ-AUTO.NS',
+  'JIOFIN':     'JIOFIN.NS',
+  'LICI':       'LICI.NS',
+  'MAXLIFE':    'MAXLIFE.NS',
+  'NAUKRI':     'NAUKRI.NS',
+  'PNBHOUSING': 'PNBHOUSING.NS',
+  'SONACOMS':   'SONACOMS.NS',
+};
+
+function toYahooSym(symbol) {
+  if (YAHOO_INDEX_MAP[symbol]) return YAHOO_INDEX_MAP[symbol];
+  if (YAHOO_EQUITY_OVERRIDES[symbol]) return YAHOO_EQUITY_OVERRIDES[symbol];
+  return `${symbol}.NS`;
+}
+
+async function fetchYahooHistory(symbol, fromDate, toDate) {
+  // Convert DD-MM-YYYY to unix timestamps
+  const parseDate = (d) => {
+    const [dd, mm, yyyy] = d.split('-');
+    return Math.floor(new Date(`${yyyy}-${mm}-${dd}T00:00:00Z`).getTime() / 1000);
+  };
+  const period1 = parseDate(fromDate);
+  const period2 = parseDate(toDate) + 86400; // include toDate
+
+  const yahooSym = toYahooSym(symbol);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1d&period1=${period1}&period2=${period2}&events=history`;
+
+  const resp = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'application/json',
+    },
+    timeout: 15000,
+  });
+
+  const result = resp.data?.chart?.result?.[0];
+  if (!result) return [];
+
+  const timestamps = result.timestamp || [];
+  const q = result.indicators?.quote?.[0] || {};
+  const opens = q.open || [];
+  const highs = q.high || [];
+  const lows = q.low || [];
+  const closes = q.close || [];
+  const volumes = q.volume || [];
+
+  return timestamps.map((ts, i) => ({
+    symbol,
+    timeframe: '1D',
+    time: new Date(ts * 1000).setHours(0, 0, 0, 0),
+    open: parseFloat((opens[i] || 0).toFixed(2)),
+    high: parseFloat((highs[i] || 0).toFixed(2)),
+    low: parseFloat((lows[i] || 0).toFixed(2)),
+    close: parseFloat((closes[i] || 0).toFixed(2)),
+    volume: parseInt(volumes[i] || 0),
+    oi: 0,
+    partial: false,
+  })).filter(c => c.open > 0 && c.close > 0);
+}
+
+/**
  * Save candles, skipping duplicates
  */
 async function saveCandles(candles) {
@@ -148,7 +222,7 @@ async function runBackfill(force = false) {
       const lastDate = force ? null : await getLastSavedDate(symbol);
       const fromDate = lastDate
         ? dayjs(lastDate).add(1, 'day').format('DD-MM-YYYY')
-        : dayjs().subtract(365, 'day').format('DD-MM-YYYY');
+        : dayjs().subtract(730, 'day').format('DD-MM-YYYY');
 
       // Skip if up to date
       if (lastDate && dayjs(lastDate).isSame(dayjs(), 'day')) {
@@ -156,7 +230,17 @@ async function runBackfill(force = false) {
         continue;
       }
 
-      const candles = await fetchEquityHistory(symbol, fromDate, toDateStr);
+      let candles = [];
+      try {
+        candles = await fetchEquityHistory(symbol, fromDate, toDateStr);
+      } catch (nseErr) {
+        console.warn(`[Backfill] NSE failed for ${symbol} (${nseErr.message}), trying Yahoo...`);
+        try {
+          candles = await fetchYahooHistory(symbol, fromDate, toDateStr);
+        } catch (yahooErr) {
+          console.error(`[Backfill] Yahoo also failed for ${symbol}: ${yahooErr.message}`);
+        }
+      }
       const saved = await saveCandles(candles);
       totalSaved += saved;
 
@@ -167,7 +251,7 @@ async function runBackfill(force = false) {
       backfillStatus.done++;
     }
 
-    // Rate limit: 500ms between requests
+    // Rate limit: 100ms between requests
     await sleep(100);
   }
 
@@ -184,7 +268,7 @@ async function runBackfill(force = false) {
       const lastDate = force ? null : await getLastSavedDate(idxSymbol);
       const fromDate = lastDate
         ? dayjs(lastDate).add(1, 'day').format('DD-MM-YYYY')
-        : dayjs().subtract(365, 'day').format('DD-MM-YYYY');
+        : dayjs().subtract(730, 'day').format('DD-MM-YYYY');
 
       if (lastDate && dayjs(lastDate).isSame(dayjs(), 'day')) {
         backfillStatus.done++;
@@ -192,7 +276,17 @@ async function runBackfill(force = false) {
       }
 
       const indexType = indexNameMap[idxSymbol] || idxSymbol;
-      const candles = await fetchIndexHistory(indexType, fromDate, toDateStr);
+      let candles = [];
+      try {
+        candles = await fetchIndexHistory(indexType, fromDate, toDateStr);
+      } catch (nseErr) {
+        console.warn(`[Backfill] NSE failed for index ${idxSymbol} (${nseErr.message}), trying Yahoo...`);
+        try {
+          candles = await fetchYahooHistory(idxSymbol, fromDate, toDateStr);
+        } catch (yahooErr) {
+          console.error(`[Backfill] Yahoo also failed for index ${idxSymbol}: ${yahooErr.message}`);
+        }
+      }
       const saved = await saveCandles(candles);
       totalSaved += saved;
       backfillStatus.done++;
