@@ -44,10 +44,14 @@ export default function App() {
       if (tick?.symbol) updateTick(tick.symbol, tick);
     });
 
-    // Option chains
-    socket.on('optionChain:NIFTY', (data) => updateOptionChain('NIFTY', data));
-    socket.on('optionChain:BANKNIFTY', (data) => updateOptionChain('BANKNIFTY', data));
-    socket.on('optionChain:NIFTY MIDCAP SELECT', (data) => updateOptionChain('NIFTY MIDCAP SELECT', data));
+    // Option chains — any symbol can have one now (indices + F&O stocks),
+    // so listen dynamically instead of hardcoding 3 index names.
+    const handleOptionChain = (data) => {
+      if (data?.symbol) updateOptionChain(data.symbol, data);
+    };
+    socket.onAny((event, payload) => {
+      if (event.startsWith('optionChain:')) handleOptionChain(payload);
+    });
 
     // Scanner
     socket.on('scanner', (results) => updateScanner(results));
@@ -65,9 +69,7 @@ export default function App() {
       socket.off('connect');
       socket.off('disconnect');
       socket.off('tick');
-      socket.off('optionChain:NIFTY');
-      socket.off('optionChain:BANKNIFTY');
-      socket.off('optionChain:NIFTY MIDCAP SELECT');
+      socket.offAny();
       socket.off('scanner');
       socket.off('marketStatus');
       socket.off('serverStatus');

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useMarketStore } from '../../store/useMarketStore';
 import { useChartStore } from '../../store/useChartStore';
+import { useOrderStore } from '../../store/useOrderStore';
 import socket from '../../socket';
 
 function OIBar({ value, max }) {
@@ -45,6 +46,32 @@ function OICell({ val, max }) {
   );
 }
 
+function TradeCell({ val, onBuy, onSell }) {
+  const [flash, setFlash] = useState(null);
+  const prev = useRef(val);
+  useEffect(() => {
+    if (prev.current !== val && val !== undefined) {
+      setFlash(val > prev.current ? 'green' : 'red');
+      const t = setTimeout(() => setFlash(null), 300);
+      prev.current = val;
+      return () => clearTimeout(t);
+    }
+    prev.current = val;
+  }, [val]);
+  return (
+    <td className={`group relative px-2 py-1 text-xs tabular-nums text-right font-semibold text-text-primary transition-colors duration-75 cursor-pointer
+      ${flash === 'green' ? 'animate-flash-green' : flash === 'red' ? 'animate-flash-red' : ''}`}>
+      {val !== undefined && val !== null ? val.toFixed(2) : '—'}
+      <div className="absolute right-0 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 flex gap-0.5 bg-surface border border-border rounded p-0.5 shadow-dropdown transition-opacity z-20">
+        <button onClick={e => { e.stopPropagation(); onBuy(); }}
+          className="px-1.5 py-0.5 text-[10px] bg-up hover:bg-up/90 text-bg font-bold rounded active:scale-[0.95]">B</button>
+        <button onClick={e => { e.stopPropagation(); onSell(); }}
+          className="px-1.5 py-0.5 text-[10px] bg-down hover:bg-down/90 text-bg font-bold rounded active:scale-[0.95]">S</button>
+      </div>
+    </td>
+  );
+}
+
 function GreekTooltip({ label, formula }) {
   const [show, setShow] = useState(false);
   return (
@@ -62,8 +89,22 @@ function GreekTooltip({ label, formula }) {
 export default function OptionChain() {
   const [collapsed, setCollapsed] = useState(false);
   const [selectedExpiry, setSelectedExpiry] = useState(null);
+  const [fnoSet, setFnoSet] = useState(new Set());
   const symbol = useChartStore(s => s.symbol);
-  const chainSymbol = ['NIFTY', 'BANKNIFTY', 'NIFTY MIDCAP SELECT'].includes(symbol) ? symbol : 'NIFTY';
+  const { openOrderPanel } = useOrderStore();
+
+  const INDEX_CHAINS = ['NIFTY', 'BANKNIFTY', 'NIFTY MIDCAP SELECT'];
+
+  useEffect(() => {
+    fetch('/api/symbols').then(r => r.json()).then(d => setFnoSet(new Set(d.fno || []))).catch(() => {});
+  }, []);
+
+  // F&O stocks (RELIANCE, TCS, INFY, ...) get their own option chain now —
+  // not just the 3 index chains. Anything with no listed F&O contracts
+  // falls back to NIFTY, with a visible note explaining why.
+  const isFnoEligible = INDEX_CHAINS.includes(symbol) || fnoSet.has(symbol);
+  const chainSymbol = isFnoEligible ? symbol : 'NIFTY';
+  const isStockChain = !INDEX_CHAINS.includes(chainSymbol);
   const chainData = useMarketStore(s => s.optionChains[chainSymbol]);
 
   useEffect(() => {
@@ -78,7 +119,7 @@ export default function OptionChain() {
     <div className="border-t border-border bg-surface px-4 py-3">
       <div className="flex items-center gap-2 text-text-secondary text-xs">
         <div className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin" />
-        Waiting for option chain data...
+        Waiting for option chain data{isStockChain ? ` (${chainSymbol} — stock chains refresh in rotation, can take a bit longer than indices)` : ''}...
       </div>
     </div>
   );
@@ -95,6 +136,9 @@ export default function OptionChain() {
   const maxCEOI = Math.max(...filteredChain.map(r => r.CE?.oi || 0));
   const maxPEOI = Math.max(...filteredChain.map(r => r.PE?.oi || 0));
 
+  const tradeOption = (side, optionType, strike, expiry) =>
+    openOrderPanel(chainSymbol, side, { optionType, strike, expiry });
+
   return (
     <div className="border-t border-border bg-surface flex-shrink-0" style={{ maxHeight: collapsed ? 40 : 220 }}>
       {/* Header */}
@@ -102,7 +146,7 @@ export default function OptionChain() {
         <div className="flex items-center gap-3">
           <button onClick={() => setCollapsed(!collapsed)} className="flex items-center gap-1 text-xs font-semibold text-text-primary hover:text-accent transition-colors">
             {collapsed ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-            Option Chain — {chainSymbol}
+            Option Chain — {chainSymbol}{isStockChain ? ' (Stock)' : ''}
           </button>
           {!collapsed && (
             <>
@@ -120,6 +164,12 @@ export default function OptionChain() {
           </select>
         )}
       </div>
+
+      {!collapsed && !isFnoEligible && (
+        <div className="px-4 py-1 text-[11px] text-warn bg-warn/5 border-b border-border">
+          {symbol} has no listed F&O contracts — showing NIFTY options instead. Pick an F&O stock (e.g. RELIANCE, TCS, INFY) to trade its own options.
+        </div>
+      )}
 
       {!collapsed && (
         <div className="overflow-auto" style={{ maxHeight: 176 }}>
@@ -157,7 +207,11 @@ export default function OptionChain() {
                     <Cell val={row.CE?.volume ? `${(row.CE.volume / 1000).toFixed(0)}K` : null} />
                     <Cell val={row.CE?.iv} />
                     <Cell val={row.CE?.greeks?.delta} />
-                    <Cell val={row.CE?.ltp} highlight />
+                    <TradeCell
+                      val={row.CE?.ltp}
+                      onBuy={() => tradeOption('BUY', 'CE', row.strike, row.expiry)}
+                      onSell={() => tradeOption('SELL', 'CE', row.strike, row.expiry)}
+                    />
                     <Cell val={row.CE?.bid} />
                     <Cell val={row.CE?.ask} />
                     {/* Strike */}
@@ -167,7 +221,11 @@ export default function OptionChain() {
                     </td>
                     <Cell val={row.PE?.bid} />
                     <Cell val={row.PE?.ask} />
-                    <Cell val={row.PE?.ltp} highlight />
+                    <TradeCell
+                      val={row.PE?.ltp}
+                      onBuy={() => tradeOption('BUY', 'PE', row.strike, row.expiry)}
+                      onSell={() => tradeOption('SELL', 'PE', row.strike, row.expiry)}
+                    />
                     <Cell val={row.PE?.greeks?.delta} />
                     <Cell val={row.PE?.iv} />
                     <Cell val={row.PE?.volume ? `${(row.PE.volume / 1000).toFixed(0)}K` : null} />

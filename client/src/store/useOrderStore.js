@@ -25,6 +25,9 @@ export const useOrderStore = create((set, get) => ({
     open: false,
     side: 'BUY', // BUY | SELL
     symbol: '',
+    optionType: 'EQ', // EQ | CE | PE — EQ = plain equity intraday/delivery buy-sell
+    strike: null,
+    expiry: null,
     orderType: 'MARKET',
     product: 'MIS',
     qty: 1,
@@ -45,8 +48,16 @@ export const useOrderStore = create((set, get) => ({
   setTradeHistory: (history) => set({ tradeHistory: history }),
   setAnalytics: (analytics) => set({ analytics }),
 
-  openOrderPanel: (symbol, side = 'BUY') => set(state => ({
-    orderPanel: { ...state.orderPanel, open: true, symbol, side },
+  openOrderPanel: (symbol, side = 'BUY', extra = {}) => set(state => ({
+    orderPanel: {
+      ...state.orderPanel,
+      open: true,
+      symbol,
+      side,
+      optionType: extra.optionType || 'EQ',
+      strike: extra.strike ?? null,
+      expiry: extra.expiry ?? null,
+    },
   })),
   closeOrderPanel: () => set(state => ({
     orderPanel: { ...state.orderPanel, open: false },

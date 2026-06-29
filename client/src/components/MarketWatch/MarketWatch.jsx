@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, X, TrendingUp, TrendingDown } from 'lucide-react';
+import { Plus, X, TrendingUp, TrendingDown, Eye } from 'lucide-react';
 import { useMarketStore } from '../../store/useMarketStore';
 import { useChartStore } from '../../store/useChartStore';
 import { useOrderStore } from '../../store/useOrderStore';
@@ -25,11 +25,32 @@ function Sparkline({ data = [] }) {
 
 function WatchRow({ symbol, onRemove }) {
   const tick = useMarketStore(s => s.ticks[symbol]);
+  const updateTick = useMarketStore(s => s.updateTick);
   const { setSymbol } = useChartStore();
   const { openOrderPanel } = useOrderStore();
   const [flash, setFlash] = useState(null);
   const prevLtp = useRef(null);
   const [history, setHistory] = useState([]);
+
+  // Off-hours / cold-start fallback: if no live tick shows up shortly,
+  // fetch a one-off REST snapshot. The server falls back NSE-snapshot ->
+  // last close, so LTP still shows up even when the market is closed.
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      if (cancelled) return;
+      const current = useMarketStore.getState().ticks[symbol];
+      if (current?.ltp) return;
+      try {
+        const r = await fetch(`/api/quote/${symbol}`);
+        if (r.ok) {
+          const data = await r.json();
+          if (!cancelled && data?.ltp) updateTick(symbol, data);
+        }
+      } catch {}
+    }, 1200);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [symbol]);
 
   useEffect(() => {
     if (!tick?.ltp) return;
@@ -45,6 +66,7 @@ function WatchRow({ symbol, onRemove }) {
     ? ((tick.ltp - tick.open) / tick.open * 100).toFixed(2)
     : '0.00';
   const isUp = parseFloat(changePct) >= 0;
+  const isStale = tick?.source && tick.source !== 'live';
 
   return (
     <div
@@ -76,9 +98,12 @@ function WatchRow({ symbol, onRemove }) {
       {/* LTP */}
       <div className="text-right min-w-[60px]">
         {tick ? (
-          <div className={`tabular-nums text-sm font-semibold ${isUp ? 'text-up' : 'text-down'}`}>
-            {tick.ltp?.toFixed(2)}
-          </div>
+          <>
+            <div className={`tabular-nums text-sm font-semibold ${isUp ? 'text-up' : 'text-down'}`}>
+              {tick.ltp?.toFixed(2)}
+            </div>
+            {isStale && <div className="text-[9px] text-text-secondary leading-tight">last close</div>}
+          </>
         ) : (
           <div className="w-14 h-4 bg-card rounded animate-pulse" />
         )}

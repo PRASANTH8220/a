@@ -149,11 +149,86 @@ async function pollEquityIndex(indexParam) {
 }
 
 /**
- * Poll NSE option chain endpoint
+ * On-demand snapshot quote — fetched straight from NSE outside the normal
+ * poller loop. This is what powers LTP when the market is closed / it's a
+ * holiday / the server just started: NSE's quote APIs keep serving the last
+ * traded price (the same number you'd see on nseindia.com after hours) even
+ * when nothing is actively trading. Our NSE cookie session is refreshed via
+ * a 25-min cron in cookie.js regardless of market hours, so this works any
+ * time of day. Used as a fallback by GET /api/quote/:symbol.
  */
-async function pollOptionChain(symbol) {
+async function fetchSnapshotQuote(symbol) {
+  const INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'NIFTY MIDCAP SELECT'];
   try {
-    const url = `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol)}`;
+    if (INDEX_SYMBOLS.includes(symbol)) {
+      const url = 'https://www.nseindia.com/api/allIndices';
+      const response = await axios.get(url, {
+        headers: getHeaders(),
+        timeout: 8000,
+        validateStatus: () => true,
+      });
+      if (isCookieDead(response)) {
+        await refreshCookies();
+        return null;
+      }
+      const row = (response.data?.data || []).find(
+        r => r.index === symbol || r.indexSymbol === symbol
+      );
+      if (!row) return null;
+      const ltp = parseFloat(row.last || row.lastPrice || 0);
+      if (!ltp) return null;
+      return {
+        symbol,
+        ltp,
+        open: parseFloat(row.open || 0),
+        high: parseFloat(row.high || row.dayHigh || 0),
+        low: parseFloat(row.low || row.dayLow || 0),
+        volume: 0,
+        oi: 0,
+        timestamp: Date.now(),
+      };
+    }
+
+    const url = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`;
+    const response = await axios.get(url, {
+      headers: getHeaders(),
+      timeout: 8000,
+      validateStatus: () => true,
+    });
+    if (isCookieDead(response)) {
+      await refreshCookies();
+      return null;
+    }
+    const priceInfo = response.data?.priceInfo || {};
+    const ltp = parseFloat(priceInfo.lastPrice || priceInfo.close || 0);
+    if (!ltp) return null;
+    return {
+      symbol,
+      ltp,
+      open: parseFloat(priceInfo.open || 0),
+      high: parseFloat(priceInfo.intraDayHighLow?.max || priceInfo.weekHighLow?.max || 0),
+      low: parseFloat(priceInfo.intraDayHighLow?.min || priceInfo.weekHighLow?.min || 0),
+      volume: parseInt(response.data?.securityWiseDP?.quantityTraded || 0),
+      oi: 0,
+      timestamp: Date.now(),
+    };
+  } catch (err) {
+    console.error(`[Poller] Snapshot fetch failed for ${symbol}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Poll NSE option chain endpoint
+ * @param {string} symbol
+ * @param {{equity?: boolean}} opts - pass { equity: true } for F&O *stock*
+ *   option chains (option-chain-equities); omit/false for index chains
+ *   (option-chain-indices) like NIFTY/BANKNIFTY/NIFTY MIDCAP SELECT.
+ */
+async function pollOptionChain(symbol, opts = {}) {
+  const endpoint = opts.equity ? 'option-chain-equities' : 'option-chain-indices';
+  try {
+    const url = `https://www.nseindia.com/api/${endpoint}?symbol=${encodeURIComponent(symbol)}`;
     const response = await axios.get(url, {
       headers: getHeaders(),
       timeout: 10000,
@@ -254,6 +329,7 @@ async function pollOptionChain(symbol) {
 
     const chainData = {
       symbol,
+      isEquity: !!opts.equity,
       underlyingLTP,
       expiryDates,
       chain: processedChain,
@@ -373,6 +449,23 @@ async function runIndexPolling() {
 }
 
 /**
+ * Rotating poller for F&O *stock* option chains (RELIANCE, TCS, INFY, ...).
+ * Index option chains (NIFTY/BANKNIFTY/NIFTY MIDCAP SELECT) refresh every
+ * second via runIndexPolling above — that cadence isn't realistic for ~185
+ * stock option chains, so instead we cycle through the F&O stock universe
+ * one symbol at a time, refreshing each roughly every (interval * count)ms.
+ * This is what lets a stock like RELIANCE show its own CE/PE chain instead
+ * of always falling back to the NIFTY chain.
+ */
+let fnoChainCursor = 0;
+async function pollNextEquityOptionChain(fnoSymbols) {
+  if (!fnoSymbols || fnoSymbols.length === 0) return;
+  const symbol = fnoSymbols[fnoChainCursor % fnoSymbols.length];
+  fnoChainCursor++;
+  await pollOptionChain(symbol, { equity: true });
+}
+
+/**
  * Rolling batch poller for full symbol universe
  * Each symbol refreshes every ~15-20 seconds
  */
@@ -428,11 +521,22 @@ async function startPolling(symbols) {
     }
   }, 1000);
 
+  // F&O stock option-chain rotation — one stock's chain every 1.5s
+  const fnoChainInterval = setInterval(async () => {
+    if (!isPolling) return;
+    try {
+      await pollNextEquityOptionChain(FNO_SYMBOLS);
+    } catch (err) {
+      console.error('[Poller] F&O option chain rotation error:', err.message);
+    }
+  }, 1500);
+
   // Batch poller for full universe
   const stopBatch = await startBatchPoller(symbols);
 
   return () => {
     clearInterval(indexInterval);
+    clearInterval(fnoChainInterval);
     stopBatch();
   };
 }
@@ -495,4 +599,5 @@ module.exports = {
   stopPolling,
   getOptionChain,
   getCircuitBreakerSymbols,
+  fetchSnapshotQuote,
 };

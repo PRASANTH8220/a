@@ -41,18 +41,28 @@ function calcMargin(symbol, qty, price, product, optionType) {
 export default function OrderPanel() {
   const { orderPanel, updateOrderPanel, closeOrderPanel, placeOrder, account, refreshAccount } = useOrderStore();
   const tick = useMarketStore(s => s.ticks[orderPanel.symbol]);
+  const chainData = useMarketStore(s => s.optionChains[orderPanel.symbol]);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => { refreshAccount(); }, []);
   useEffect(() => { setResult(null); }, [orderPanel.symbol, orderPanel.side]);
 
-  const lotSize = LOT_SIZES[orderPanel.symbol] || 1;
-  const ltp = tick?.ltp || 0;
-  const price = orderPanel.orderType === 'MARKET' ? ltp : parseFloat(orderPanel.limitPrice) || ltp;
   const optionType = orderPanel.optionType || 'EQ';
+  const isOption = optionType === 'CE' || optionType === 'PE';
+
+  // For options, price off the specific strike/expiry leg from the live
+  // option chain cache rather than the underlying's equity tick.
+  const optionRow = isOption && chainData
+    ? chainData.chain.find(r => r.strike === orderPanel.strike && r.expiry === orderPanel.expiry)
+    : null;
+  const optionLeg = optionRow ? optionRow[optionType] : null;
+
+  const lotSize = LOT_SIZES[orderPanel.symbol] || 1;
+  const ltp = isOption ? (optionLeg?.ltp || 0) : (tick?.ltp || 0);
+  const price = orderPanel.orderType === 'MARKET' ? ltp : parseFloat(orderPanel.limitPrice) || ltp;
   const isFnO = FNO_SET.has(orderPanel.symbol);
-  const segmentLabel = isFnO ? 'F&O' : 'EQ';
+  const segmentLabel = isOption ? `F&O · ${optionType}` : isFnO ? 'F&O · EQ' : 'EQ';
   const { margin: marginRequired, leverage, label: leverageLabel } = calcMargin(
     orderPanel.symbol, orderPanel.qty * lotSize, price, orderPanel.product, optionType
   );
@@ -69,6 +79,9 @@ export default function OrderPanel() {
       limitPrice: parseFloat(orderPanel.limitPrice) || null,
       triggerPrice: parseFloat(orderPanel.triggerPrice) || null,
       lotSize,
+      optionType,
+      strike: orderPanel.strike,
+      expiry: orderPanel.expiry,
     });
     setLoading(false);
     setResult(res);
@@ -107,7 +120,16 @@ export default function OrderPanel() {
           <label className="text-xs text-text-secondary block mb-1">Symbol</label>
           <div className="bg-card border border-border rounded-md px-3 py-2 text-sm font-semibold text-text-primary">
             {orderPanel.symbol || '—'}
+            {isOption && orderPanel.strike && (
+              <span className="ml-1">
+                {orderPanel.strike} {optionType}
+                {orderPanel.expiry && <span className="text-text-secondary font-normal"> · {orderPanel.expiry}</span>}
+              </span>
+            )}
             {ltp > 0 && <span className="ml-2 tabular-nums text-text-secondary text-xs">{ltp.toFixed(2)}</span>}
+            {isOption && !optionLeg && (
+              <span className="ml-2 text-warn text-xs font-normal">waiting for chain data...</span>
+            )}
           </div>
         </div>
 
@@ -151,6 +173,12 @@ export default function OrderPanel() {
           <input type="number" min="1" value={orderPanel.qty}
             onChange={e => updateOrderPanel({ qty: e.target.value })}
             className="w-full bg-card border border-border rounded-md px-3 py-2 text-sm text-text-primary tabular-nums focus:ring-2 focus:ring-accent focus:border-accent focus:outline-none transition-shadow" />
+          {isFnO && !LOT_SIZES[orderPanel.symbol] && (
+            <p className="text-[11px] text-text-secondary mt-1">
+              Stock F&O lot sizes vary by symbol and are revised by NSE every quarter —
+              this defaults to 1 share/contract. Multiply Qty yourself if you want to model a real lot.
+            </p>
+          )}
         </div>
 
         {/* Limit Price */}

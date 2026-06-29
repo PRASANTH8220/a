@@ -12,7 +12,7 @@ const Redis = require('ioredis');
 const cron = require('node-cron');
 
 const { initCookies } = require('./cookie');
-const { initPollerSchedule, getOptionChain, getCircuitBreakerSymbols } = require('./poller');
+const { initPollerSchedule, getOptionChain, getCircuitBreakerSymbols, fetchSnapshotQuote } = require('./poller');
 const { init: initCandle, runCandleBuilder, buildDailyCandles, preloadCandleCache, getCandles, notifyPollerStopped } = require('./candle');
 const { startScanner, getLatestResults, getLatestTick } = require('./scanner');
 const { checkAndRunBackfill, getStatus: getBackfillStatus } = require('./backfill');
@@ -116,11 +116,53 @@ app.get('/api/symbols', (req, res) => {
   });
 });
 
-// Latest tick for a symbol
-app.get('/api/quote/:symbol', (req, res) => {
-  const tick = getLatestTick(req.params.symbol.toUpperCase());
-  if (!tick) return res.status(404).json({ error: 'No tick data available' });
-  res.json(tick);
+// Latest tick for a symbol — falls back to an on-demand NSE snapshot, then
+// the last stored daily close, so LTP is still available when the market
+// is closed (after 15:31 IST, weekends, holidays, or right after a fresh
+// server start before the poller has produced a tick yet).
+app.get('/api/quote/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+
+  // 1) Live in-memory tick from the poller (market open)
+  const liveTick = getLatestTick(symbol);
+  if (liveTick) return res.json({ ...liveTick, source: 'live' });
+
+  // 2) On-demand snapshot straight from NSE. NSE's quote APIs keep
+  //    returning the last traded price after hours, so this works even
+  //    when the scheduled poller isn't running.
+  try {
+    const snapshot = await fetchSnapshotQuote(symbol);
+    if (snapshot && snapshot.ltp > 0) {
+      return res.json({ ...snapshot, source: 'nse_snapshot' });
+    }
+  } catch (err) {
+    console.error(`[API] Snapshot fetch failed for ${symbol}:`, err.message);
+  }
+
+  // 3) Last stored daily candle close — works fully offline (no NSE call),
+  //    covers symbols NSE's live quote API won't return cleanly (e.g. when
+  //    cookies are mid-refresh).
+  try {
+    const candles = await getCandles(symbol, '1D', 1);
+    if (candles.length) {
+      const c = candles[candles.length - 1];
+      return res.json({
+        symbol,
+        ltp: c.close,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        volume: c.volume,
+        oi: c.oi || 0,
+        timestamp: c.time,
+        source: 'last_close',
+      });
+    }
+  } catch (err) {
+    console.error(`[API] Last-close fallback failed for ${symbol}:`, err.message);
+  }
+
+  res.status(404).json({ error: 'No tick data available' });
 });
 
 // Backfill status
@@ -160,10 +202,45 @@ app.post('/api/paper/reset', async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Shared helper: best-available LTP for the underlying (live -> NSE snapshot -> last close)
+async function resolveLTP(symbol) {
+  const sym = symbol.toUpperCase();
+  const liveTick = getLatestTick(sym);
+  if (liveTick?.ltp) return liveTick.ltp;
+  try {
+    const snapshot = await fetchSnapshotQuote(sym);
+    if (snapshot?.ltp) return snapshot.ltp;
+  } catch (err) {
+    console.error(`[API] resolveLTP snapshot failed for ${sym}:`, err.message);
+  }
+  try {
+    const candles = await getCandles(sym, '1D', 1);
+    if (candles.length) return candles[candles.length - 1].close;
+  } catch (err) {
+    console.error(`[API] resolveLTP last-close failed for ${sym}:`, err.message);
+  }
+  return 0;
+}
+
+// Best-available execution price for an order: for CE/PE option orders this
+// is the strike's own premium from the cached option chain (NOT the
+// underlying's equity price); for plain EQ orders it's the underlying LTP.
+async function resolveOrderPrice({ symbol, optionType, strike, expiry }) {
+  const sym = (symbol || '').toUpperCase();
+  const isOption = optionType === 'CE' || optionType === 'PE';
+  if (isOption) {
+    const chain = getOptionChain(sym);
+    const row = chain?.chain?.find(r => r.strike === strike && (!expiry || r.expiry === expiry));
+    const leg = row ? row[optionType] : null;
+    return leg?.ltp || 0;
+  }
+  return resolveLTP(sym);
+}
+
 app.post('/api/paper/order', async (req, res) => {
   try {
-    const tick = getLatestTick(req.body.symbol);
-    const currentLTP = tick?.ltp || req.body.limitPrice || 0;
+    const resolved = await resolveOrderPrice(req.body);
+    const currentLTP = resolved || req.body.limitPrice || 0;
     res.json(await paper.placeOrder({ ...req.body, currentLTP }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -171,10 +248,13 @@ app.post('/api/paper/order', async (req, res) => {
 app.post('/api/paper/close', async (req, res) => {
   try {
     const { tradeId } = req.body;
-    const trade = await paper.getPositions();
-    const pos = trade.find(t => t._id.toString() === tradeId);
-    const tick = pos ? getLatestTick(pos.symbol) : null;
-    const exitPrice = tick?.ltp || req.body.exitPrice || 0;
+    const positions = await paper.getPositions();
+    const pos = positions.find(t => t._id.toString() === tradeId);
+    let exitPrice = req.body.exitPrice || 0;
+    if (pos) {
+      const resolved = await resolveOrderPrice(pos);
+      exitPrice = resolved || exitPrice;
+    }
     res.json(await paper.closePosition({ tradeId, exitPrice }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

@@ -1,7 +1,8 @@
 import React from 'react';
-import { Eye, BarChart2, Briefcase, ClipboardList, LineChart } from 'lucide-react';
+import { Eye, BarChart2, Briefcase, ClipboardList, LineChart, Building2 } from 'lucide-react';
 import { useOrderStore } from '../../store/useOrderStore';
 import MarketWatch from '../MarketWatch/MarketWatch';
+import StocksList from '../Stocks/StocksList';
 import Scanner from '../Scanner/Scanner';
 import Positions from '../Positions/Positions';
 import OrderBook from '../Orders/OrderBook';
@@ -9,6 +10,7 @@ import Analytics from '../Analytics/Analytics';
 
 const TABS = [
   { key: 'watchlist', label: 'Watch', Icon: Eye },
+  { key: 'stocks', label: 'Stocks', Icon: Building2 },
   { key: 'scanner', label: 'Scan', Icon: BarChart2 },
   { key: 'positions', label: 'Positions', Icon: Briefcase },
   { key: 'orders', label: 'Orders', Icon: ClipboardList },
@@ -40,6 +42,7 @@ export default function Sidebar() {
       {/* Tab Content */}
       <div className="flex-1 overflow-hidden">
         {activeTab === 'watchlist' && <MarketWatch />}
+        {activeTab === 'stocks' && <StocksList />}
         {activeTab === 'scanner' && <Scanner />}
         {activeTab === 'positions' && <Positions />}
         {activeTab === 'orders' && <OrderBook />}
