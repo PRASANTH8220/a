@@ -18,6 +18,7 @@ const { startScanner, getLatestResults, getLatestTick } = require('./scanner');
 const { checkAndRunBackfill, getStatus: getBackfillStatus } = require('./backfill');
 const { NIFTY50_SYMBOLS, NIFTY100_SYMBOLS, NIFTY500_SYMBOLS, FNO_SYMBOLS, INDICES } = require('./symbols');
 const paper = require('./paperTrading');
+const { fetchFromTV } = require('./historicalFeed');
 
 // ─── Express & Socket.IO Setup ─────────────────────────────────────────────
 const app = express();
@@ -77,7 +78,15 @@ app.get('/api/candles/:symbol/:timeframe', async (req, res) => {
     const { symbol, timeframe } = req.params;
     const limit = parseInt(req.query.limit) || 200;
     const before = req.query.before || null;
-    const candles = await getCandles(symbol, timeframe, limit, before);
+    let candles = await getCandles(symbol, timeframe, limit, before);
+
+    // Fallback: DB empty (market closed/first run) -> TradingView public UDF
+    if (!candles.length && !before) {
+      console.log(`[Candles] DB empty for ${symbol}/${timeframe}, fetching from TradingView...`);
+      try { candles = await fetchFromTV(symbol, timeframe, limit); }
+      catch (tvErr) { console.error('[Candles] TV fallback failed:', tvErr.message); }
+    }
+
     res.json({ candles, serverStartDate: process.env.SERVER_START_DATE || new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
