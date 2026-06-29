@@ -1,7 +1,38 @@
 import React, { useEffect, useState } from 'react';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { RotateCcw, TrendingUp, AlertTriangle } from 'lucide-react';
 import { useOrderStore } from '../../store/useOrderStore';
+
+function MiniLineChart({ data, valueKey = 'value', color = '#1E88E5', height = 100 }) {
+  if (!data || data.length < 2) return <div style={{ height }} className="flex items-center justify-center text-text-secondary text-xs">No data</div>;
+  const values = data.map(d => d[valueKey]);
+  const min = Math.min(...values), max = Math.max(...values), range = max - min || 1;
+  const w = 220, h = height - 10;
+  const pts = values.map((v, i) => `${(i / (values.length - 1)) * w},${h - ((v - min) / range) * h}`).join(' ');
+  return (
+    <svg width="100%" viewBox={`0 0 ${w} ${h + 10}`} preserveAspectRatio="none" style={{ height }}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function MiniBarChart({ data, valueKey = 'pnl', height = 80 }) {
+  if (!data || data.length < 1) return <div style={{ height }} className="flex items-center justify-center text-text-secondary text-xs">No data</div>;
+  const values = data.map(d => d[valueKey]);
+  const max = Math.max(...values.map(Math.abs)) || 1;
+  const w = 220, h = height;
+  const bw = Math.max(2, (w / values.length) - 2);
+  return (
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ height }}>
+      <line x1="0" y1={h / 2} x2={w} y2={h / 2} stroke="#2A2E35" strokeWidth="0.5" />
+      {values.map((v, i) => {
+        const barH = (Math.abs(v) / max) * (h / 2 - 2);
+        const x = (i / values.length) * w;
+        const y = v >= 0 ? h / 2 - barH : h / 2;
+        return <rect key={i} x={x + 1} y={y} width={bw} height={barH} fill={v >= 0 ? '#0ECB81' : '#F6465D'} opacity="0.8" />;
+      })}
+    </svg>
+  );
+}
 
 // Inline recharts import — falls back to simple SVG if not available
 let charts = null;
