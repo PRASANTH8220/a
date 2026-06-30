@@ -102,6 +102,8 @@ async function fetchYahooIntraday(symbol) {
     volume: parseInt(q.volume?.[i] || 0),
     oi: 0, partial: false,
   })).filter(c => c.close > 0);
+  return filterMarketHours(raw);
+}
 
 /**
  * Yahoo Finance: fetch daily OHLCV (5 months back — sufficient for indicators)
@@ -314,4 +316,4 @@ async function fetchYahooIntradayForDate(symbol, dateStr, timeframe) {
   return aggregate(filtered, timeframe);
 }
 
-module.exports = { fetchFromNSE, fetchYahooIntradayForDate };}
+module.exports = { fetchFromNSE, fetchYahooIntradayForDate };

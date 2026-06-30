@@ -3,6 +3,21 @@
  */
 
 require('dotenv').config();
+
+// ─── AngelOne SmartAPI Credentials ─────────────────────────────────────────
+// Loaded from .env — used by any module that integrates AngelOne SmartAPI.
+// Existing NSE polling logic is UNCHANGED; these are additive credentials only.
+const ANGEL_CONFIG = {
+  apiKey:      process.env.ANGEL_API_KEY      || '',
+  totpSecret:  process.env.ANGEL_TOTP_SECRET  || '',
+  staticIp:    process.env.ANGEL_STATIC_IP    || '',
+  clientId:    process.env.ANGEL_CLIENT_ID    || '',
+  password:    process.env.ANGEL_PASSWORD     || '',
+  mpin:        process.env.ANGEL_MPIN         || '',
+};
+module.exports.ANGEL_CONFIG = ANGEL_CONFIG;
+// ────────────────────────────────────────────────────────────────────────────
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -351,29 +366,40 @@ async function bootstrap() {
   // Record server start date
   process.env.SERVER_START_DATE = new Date().toISOString();
 
-  // Initialize NSE cookies
+  // Initialize NSE cookies — still needed for option-chain REST calls
   await initCookies();
 
-  // Initialize modules
   const allSymbols = [...new Set([...NIFTY500_SYMBOLS, ...FNO_SYMBOLS, ...INDICES])];
   initCandle(redis, io);
 
   // Preload candle cache
-  await preloadCandleCache(NIFTY50_SYMBOLS); // preload top 50 on startup
+  await preloadCandleCache(NIFTY50_SYMBOLS);
 
   // Initialize scanner
   startScanner(io);
 
-  // Initialize poller with stop callback for 1D aggregation
-  const { init: initPoller } = require('./poller');
-  initPoller(redis, io, () => {
-    notifyPollerStopped();
-    // 1D aggregation after 15:31
-    setTimeout(() => buildDailyCandles(allSymbols), 5000);
-  });
+  // ── Live Feed: AngelOne SmartAPI (primary) → NSE poller (fallback) ────────
+  const { initAngelOneFeed, stopFeed: stopAngelFeed } = require('./angelone');
+  const angelOk = await initAngelOneFeed(allSymbols, redis, io);
 
-  // Schedule polling (starts at 9:00 AM on trading days)
-  initPollerSchedule(allSymbols);
+  if (!angelOk) {
+    // Fallback: NSE cookie poller (used when AngelOne creds not yet set)
+    console.log('[Bootstrap] Using NSE cookie poller as fallback.');
+    const { init: initPoller } = require('./poller');
+    initPoller(redis, io, () => {
+      notifyPollerStopped();
+      setTimeout(() => buildDailyCandles(allSymbols), 5000);
+    });
+    initPollerSchedule(allSymbols);
+  } else {
+    // AngelOne is live — handle 15:31 EOD aggregation via cron
+    cron.schedule('31 15 * * 1-5', () => {
+      stopAngelFeed();
+      notifyPollerStopped();
+      setTimeout(() => buildDailyCandles(allSymbols), 5000);
+    }, { timezone: 'Asia/Kolkata' });
+  }
+  // ──────────────────────────────────────────────────────────────────────────
 
   // Candle builder: run every 60 seconds
   setInterval(() => {

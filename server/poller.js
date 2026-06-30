@@ -596,11 +596,25 @@ function getCircuitBreakerSymbols() {
 }
 
 /**
+ * Returns true if the current IST time is within market hours: 09:00–15:31
+ */
+function isMarketHoursNow() {
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const h = now.getHours();
+  const m = now.getMinutes();
+  const totalMins = h * 60 + m;
+  return totalMins >= 9 * 60 && totalMins < 15 * 60 + 31; // 09:00–15:30
+}
+
+/**
  * Initialize polling schedule
+ * - Starts immediately if server boots during market hours (09:00–15:30 IST)
+ * - Schedules 9:00 AM cron for subsequent days
  */
 function initPollerSchedule(symbols) {
-  // Start at 9:00:00 IST
-  cron.schedule('0 9 * * *', async () => {
+  let stopFn = null;
+
+  async function doStart() {
     const today = new Date();
     if (!isTradingDay(today)) {
       const holidayName = getTodayHolidayName();
@@ -609,27 +623,28 @@ function initPollerSchedule(symbols) {
       if (io) io.emit('marketStatus', { open: false, reason });
       return;
     }
-
-    console.log('[Poller] Market open. Starting polling at 9:00 IST...');
+    if (isPolling) return; // already running
+    console.log('[Poller] Market open. Starting polling...');
     if (io) io.emit('marketStatus', { open: true });
-    const stopFn = await startPolling(symbols);
+    stopFn = await startPolling(symbols);
+  }
 
-    // Stop at 15:31:00 IST
-    cron.schedule('31 15 * * *', () => {
-      stopFn();
-      stopPolling();
-    }, { once: true });
+  // ── Boot-time check: start immediately if already in market hours ──────────
+  if (isMarketHoursNow()) {
+    console.log('[Poller] Server started during market hours — starting polling now.');
+    doStart();
+  } else {
+    console.log('[Poller] Scheduler initialized. Will start at 9:00 AM IST on trading days.');
+  }
 
-  }, { timezone: 'Asia/Kolkata' });
+  // ── 9:00 AM IST cron — for subsequent days ─────────────────────────────────
+  cron.schedule('0 9 * * *', () => doStart(), { timezone: 'Asia/Kolkata' });
 
-  // Stop at 15:31 IST (backup cron)
+  // ── 15:31 IST stop cron ────────────────────────────────────────────────────
   cron.schedule('31 15 * * *', () => {
-    if (isPolling) {
-      stopPolling();
-    }
+    if (stopFn) { stopFn(); stopFn = null; }
+    if (isPolling) stopPolling();
   }, { timezone: 'Asia/Kolkata' });
-
-  console.log('[Poller] Scheduler initialized. Will start at 9:00 AM IST on trading days.');
 }
 
 module.exports = {

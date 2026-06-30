@@ -140,7 +140,15 @@ async function saveCandle(candle) {
 }
 
 /**
- * Run candle builder for all symbols across all timeframes
+ * Run candle builder for all symbols across all timeframes.
+ *
+ * INTRADAY (1min/5min/15min/1hr) — NOT saved to MongoDB.
+ * Realtime ticks live in Redis (TTL 86400s) and are pushed to clients via Socket.IO.
+ * Historical intraday data is served on-demand from Yahoo Finance (historicalFeed.js).
+ * Now that AngelOne SmartAPI supplies the live feed, storing realtime-derived
+ * intraday candles in Mongo is redundant and wastes write throughput.
+ *
+ * DAILY (1D) — still aggregated by buildDailyCandles() after 15:31 and saved to MongoDB.
  */
 async function runCandleBuilder(symbols) {
   const now = Math.floor(Date.now() / 1000);
@@ -153,7 +161,21 @@ async function runCandleBuilder(symbols) {
     for (const symbol of symbols) {
       try {
         const candle = await buildCandle(symbol, tf, windowStart * 1000, windowEnd * 1000);
-        if (candle) await saveCandle(candle);
+        if (!candle) continue;
+
+        // Update in-memory cache and emit via Socket.IO — skip MongoDB write
+        const cacheKey = `${symbol}_${tf}`;
+        if (!candleCache[cacheKey]) candleCache[cacheKey] = [];
+        const idx = candleCache[cacheKey].findIndex(c => c.time === candle.time);
+        if (idx >= 0) candleCache[cacheKey][idx] = candle;
+        else {
+          candleCache[cacheKey].push(candle);
+          if (candleCache[cacheKey].length > 500) candleCache[cacheKey].shift();
+        }
+        if (io) {
+          const indicators = computeAllIndicators(candleCache[cacheKey]);
+          io.emit('candle', { symbol, timeframe: tf, candle, indicators });
+        }
       } catch (err) {
         console.error(`[Candle] Error building ${tf} candle for ${symbol}:`, err.message);
       }
