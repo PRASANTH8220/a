@@ -21,6 +21,11 @@ const CandleSchema = new mongoose.Schema({
 
 CandleSchema.index({ symbol: 1, timeframe: 1, time: 1 }, { unique: true });
 
+// Auto-expire intraday candles after 2 days (48h), daily candles after 13 months.
+// MongoDB's TTL index fires on `expireAt` — we set this field on every save.
+// This means we never need manual cleanup for stale data.
+CandleSchema.add({ expireAt: { type: Date, index: { expireAfterSeconds: 0 } } });
+
 let Candle;
 try {
   Candle = mongoose.model('Candle');
@@ -95,9 +100,19 @@ async function buildCandle(symbol, timeframe, windowStart, windowEnd) {
  */
 async function saveCandle(candle) {
   try {
+    // Set TTL: intraday expires after 2 days, daily after 13 months
+    const INTRADAY_TF = ['1min', '5min', '15min', '1hr'];
+    const isIntraday = INTRADAY_TF.includes(candle.timeframe);
+    const expireAt = new Date();
+    if (isIntraday) {
+      expireAt.setDate(expireAt.getDate() + 2);   // 48h — keeps yesterday's data for reference
+    } else {
+      expireAt.setMonth(expireAt.getMonth() + 13); // 13 months — ~1 year of trading days
+    }
+
     await Candle.findOneAndUpdate(
       { symbol: candle.symbol, timeframe: candle.timeframe, time: candle.time },
-      candle,
+      { ...candle, expireAt },
       { upsert: true, new: true }
     );
 
@@ -228,6 +243,59 @@ async function getCandles(symbol, timeframe, limit = 200, before = null) {
     .then(candles => candles.reverse());
 }
 
+/**
+ * purgeIntradayCandles — delete all intraday (1min/5min/15min/1hr) candles
+ * from MongoDB that are older than today. Called at/after market close (15:31 IST).
+ * Redis ticks also expire automatically (TTL 86400s = 1 day).
+ */
+async function purgeIntradayCandles() {
+  const todayIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  todayIST.setHours(0, 0, 0, 0);
+  const todayMs = todayIST.getTime();
+
+  const INTRADAY_TIMEFRAMES = ['1min', '5min', '15min', '1hr'];
+  try {
+    const result = await Candle.deleteMany({
+      timeframe: { $in: INTRADAY_TIMEFRAMES },
+      time: { $lt: todayMs },
+    });
+    console.log(`[Candle] Purged ${result.deletedCount} stale intraday candles from MongoDB`);
+
+    // Also clear in-memory cache for intraday
+    for (const key of Object.keys(candleCache)) {
+      if (INTRADAY_TIMEFRAMES.some(tf => key.endsWith(`_${tf}`))) {
+        delete candleCache[key];
+      }
+    }
+  } catch (err) {
+    console.error('[Candle] Error purging intraday candles:', err.message);
+  }
+}
+
+/**
+ * pruneDailyCandles — keep only last 365 daily candles per symbol in MongoDB.
+ * Prevents unbounded 1D data growth over time.
+ */
+async function pruneDailyCandles(symbols) {
+  const KEEP = 365;
+  for (const symbol of symbols) {
+    try {
+      // Find the cutoff timestamp: keep only the latest KEEP candles
+      const cutoffCandle = await Candle.find({ symbol, timeframe: '1D' })
+        .sort({ time: -1 })
+        .skip(KEEP)
+        .limit(1)
+        .lean();
+      if (cutoffCandle.length) {
+        await Candle.deleteMany({ symbol, timeframe: '1D', time: { $lte: cutoffCandle[0].time } });
+      }
+    } catch (err) {
+      // non-fatal
+    }
+  }
+  console.log(`[Candle] Daily candles pruned to last ${KEEP} per symbol`);
+}
+
 module.exports = {
   init,
   runCandleBuilder,
@@ -235,5 +303,7 @@ module.exports = {
   preloadCandleCache,
   getCandles,
   notifyPollerStopped,
+  purgeIntradayCandles,
+  pruneDailyCandles,
   Candle,
 };

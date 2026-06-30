@@ -313,10 +313,54 @@ async function getAnalytics(sessionId = 'default') {
   };
 }
 
+/**
+ * squareOffAllMIS — Auto square-off all open MIS (intraday) positions at market close.
+ * Called by a cron job at 15:25 IST. Uses the provided LTP resolver to get exit prices.
+ * @param {Function} ltpResolver - async (symbol) => ltp (number)
+ */
+async function squareOffAllMIS(ltpResolver) {
+  const openMIS = await Trade.find({ status: 'OPEN', product: 'MIS' }).lean();
+  if (openMIS.length === 0) {
+    console.log('[PaperTrading] EOD square-off: no open MIS positions');
+    return { squaredOff: 0, totalPnL: 0 };
+  }
+
+  console.log(`[PaperTrading] EOD square-off: closing ${openMIS.length} MIS position(s)...`);
+  let totalPnL = 0;
+
+  for (const pos of openMIS) {
+    try {
+      // Get best available exit price
+      let exitPrice = 0;
+      if (typeof ltpResolver === 'function') {
+        exitPrice = await ltpResolver(pos.symbol);
+      }
+      if (!exitPrice) exitPrice = pos.entryPrice; // fallback: no loss / no gain
+
+      const result = await closePosition({
+        sessionId: pos.sessionId,
+        tradeId: pos._id.toString(),
+        exitPrice,
+      });
+
+      if (result.success) {
+        totalPnL += result.pnl;
+        console.log(`[PaperTrading] EOD squared off ${pos.symbol} ${pos.side} x${pos.qty} | entry:${pos.entryPrice} exit:${exitPrice.toFixed(2)} pnl:${result.pnl.toFixed(2)}`);
+      }
+    } catch (err) {
+      console.error(`[PaperTrading] EOD square-off failed for trade ${pos._id}:`, err.message);
+    }
+  }
+
+  console.log(`[PaperTrading] EOD square-off complete. Total P&L: ₹${totalPnL.toFixed(2)}`);
+  return { squaredOff: openMIS.length, totalPnL };
+}
+
 module.exports = {
   getAccount,
   placeOrder,
   closePosition,
+  squareOffAllMIS,
   topUp,
   resetAccount,
   getTradeHistory,

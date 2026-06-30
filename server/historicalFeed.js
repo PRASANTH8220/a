@@ -69,9 +69,21 @@ function aggregate(candles1min, timeframe) {
 /**
  * Yahoo Finance: fetch intraday 1-min candles for today (up to 7 days back)
  */
+/**
+ * Filter candles to NSE market hours only: 09:15–15:30 IST.
+ * Yahoo returns pre-market (04:00 IST) and post-market junk — strip it.
+ */
+function filterMarketHours(candles) {
+  return candles.filter(c => {
+    // totalMinsIST = minutes elapsed since midnight IST
+    const totalMinsIST = (new Date(c.time).getUTCHours() * 60 + new Date(c.time).getUTCMinutes() + 330) % 1440;
+    return totalMinsIST >= 555 && totalMinsIST <= 930; // 09:15–15:30
+  });
+}
+
 async function fetchYahooIntraday(symbol) {
   const yahooSym = toYahooSymbol(symbol);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1m&range=1d`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}?interval=1m&range=1d&includePrePost=false`;
   const resp = await axios.get(url, {
     headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
     timeout: 12000,
@@ -80,7 +92,7 @@ async function fetchYahooIntraday(symbol) {
   if (!result) return [];
   const timestamps = result.timestamp || [];
   const q = result.indicators?.quote?.[0] || {};
-  return timestamps.map((ts, i) => ({
+  const raw = timestamps.map((ts, i) => ({
     symbol, timeframe: '1min',
     time: ts * 1000,
     open:   parseFloat((q.open?.[i]  || 0).toFixed(2)),
@@ -90,10 +102,9 @@ async function fetchYahooIntraday(symbol) {
     volume: parseInt(q.volume?.[i] || 0),
     oi: 0, partial: false,
   })).filter(c => c.close > 0);
-}
 
 /**
- * Yahoo Finance: fetch daily OHLCV (1 year back)
+ * Yahoo Finance: fetch daily OHLCV (5 months back — sufficient for indicators)
  */
 async function fetchYahooDaily(symbol, days = 365) {
   const yahooSym = toYahooSymbol(symbol);
@@ -177,7 +188,7 @@ async function fetchFromNSE(symbol, timeframe, limit = 200) {
     if (isIndex) {
       // Indices 1D: try Yahoo directly (NSE indices history needs special endpoint)
       try {
-        const candles = await fetchYahooDaily(symbol, 730);
+        const candles = await fetchYahooDaily(symbol, 365);
         console.log(`[Feed] Index 1D ${symbol} via Yahoo: ${candles.length} candles`);
         return candles.slice(-limit);
       } catch (err) {
@@ -193,7 +204,7 @@ async function fetchFromNSE(symbol, timeframe, limit = 200) {
       console.warn(`[Feed] NSE daily failed for ${symbol} (${err.message}), trying Yahoo...`);
     }
     try {
-      const candles = await fetchYahooDaily(symbol, 730);
+      const candles = await fetchYahooDaily(symbol, 365);
       console.log(`[Feed] Equity 1D ${symbol} via Yahoo: ${candles.length} candles`);
       return candles.slice(-limit);
     } catch (err) {
@@ -246,4 +257,61 @@ async function fetchFromNSE(symbol, timeframe, limit = 200) {
   }
 }
 
-module.exports = { fetchFromNSE };
+/**
+ * Yahoo Finance: fetch intraday candles for a SPECIFIC past date.
+ * Yahoo supports:
+ *   interval=1m  → up to 7 days back
+ *   interval=5m  → up to 60 days back
+ *   interval=15m → up to 60 days back
+ *   interval=1h  → up to 730 days back
+ * We fetch the finest available granularity for the date and aggregate up.
+ */
+async function fetchYahooIntradayForDate(symbol, dateStr, timeframe) {
+  // dateStr = 'YYYY-MM-DD'
+  const date = new Date(dateStr + 'T00:00:00+05:30'); // IST midnight
+  const dayStart = Math.floor(date.getTime() / 1000);
+  const dayEnd = dayStart + 86400; // next midnight
+
+  const daysAgo = Math.floor((Date.now() / 1000 - dayStart) / 86400);
+
+  // Pick finest Yahoo interval available for this date
+  let yahooInterval;
+  if (daysAgo <= 7)  yahooInterval = '1m';
+  else if (daysAgo <= 60) yahooInterval = '5m';
+  else yahooInterval = '1h'; // up to 730 days
+
+  const yahooSym = toYahooSymbol(symbol);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSym)}` +
+    `?interval=${yahooInterval}&period1=${dayStart}&period2=${dayEnd}&includePrePost=false`;
+
+  const resp = await axios.get(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+    timeout: 15000,
+  });
+
+  const result = resp.data?.chart?.result?.[0];
+  if (!result) return [];
+  const timestamps = result.timestamp || [];
+  const q = result.indicators?.quote?.[0] || {};
+
+  // Build base candles at Yahoo's finest interval
+  const baseInterval = yahooInterval === '1m' ? '1min'
+    : yahooInterval === '5m' ? '5min' : '1hr';
+
+  const baseCandels = timestamps.map((ts, i) => ({
+    symbol, timeframe: baseInterval,
+    time: ts * 1000,
+    open:   parseFloat((q.open?.[i]  || 0).toFixed(2)),
+    high:   parseFloat((q.high?.[i]  || 0).toFixed(2)),
+    low:    parseFloat((q.low?.[i]   || 0).toFixed(2)),
+    close:  parseFloat((q.close?.[i] || 0).toFixed(2)),
+    volume: parseInt(q.volume?.[i] || 0),
+    oi: 0, partial: false,
+  })).filter(c => c.close > 0);
+
+  // Strip pre/post market noise, then aggregate to requested timeframe
+  const filtered = filterMarketHours(baseCandels);
+  return aggregate(filtered, timeframe);
+}
+
+module.exports = { fetchFromNSE, fetchYahooIntradayForDate };}

@@ -4,6 +4,7 @@ export const useChartStore = create((set, get) => ({
   symbol: 'NIFTY',
   timeframe: '1D',
   candles: [],
+  symbolLoadId: 0,   // increments on every symbol change — Chart uses this to cancel stale fetches
   indicators: {
     rsi: [],
     macd: [],
@@ -32,7 +33,7 @@ export const useChartStore = create((set, get) => ({
   serverStartDate: null,
   hasMore: true,
 
-  setSymbol: (symbol) => set({ symbol, candles: [], hasMore: true }),
+  setSymbol: (symbol) => set(state => ({ symbol, candles: [], hasMore: true, symbolLoadId: state.symbolLoadId + 1 })),
   setTimeframe: (timeframe) => set({ timeframe, candles: [], hasMore: true }),
   setCandles: (candles) => set({ candles }),
   appendCandles: (older) => set(state => ({

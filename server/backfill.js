@@ -160,12 +160,15 @@ async function fetchYahooHistory(symbol, fromDate, toDate) {
  */
 async function saveCandles(candles) {
   if (!candles.length) return 0;
+  // All candles saved from backfill are 1D — expire after 13 months
+  const expireAt = new Date();
+  expireAt.setMonth(expireAt.getMonth() + 13);
   let saved = 0;
   for (const c of candles) {
     try {
       await Candle.findOneAndUpdate(
         { symbol: c.symbol, timeframe: c.timeframe, time: c.time },
-        c,
+        { ...c, expireAt },
         { upsert: true }
       );
       saved++;
@@ -222,7 +225,7 @@ async function runBackfill(force = false) {
       const lastDate = force ? null : await getLastSavedDate(symbol);
       const fromDate = lastDate
         ? dayjs(lastDate).add(1, 'day').format('DD-MM-YYYY')
-        : dayjs().subtract(730, 'day').format('DD-MM-YYYY');
+        : dayjs().subtract(365, 'day').format('DD-MM-YYYY');
 
       // Skip if up to date
       if (lastDate && dayjs(lastDate).isSame(dayjs(), 'day')) {
@@ -268,7 +271,7 @@ async function runBackfill(force = false) {
       const lastDate = force ? null : await getLastSavedDate(idxSymbol);
       const fromDate = lastDate
         ? dayjs(lastDate).add(1, 'day').format('DD-MM-YYYY')
-        : dayjs().subtract(730, 'day').format('DD-MM-YYYY');
+        : dayjs().subtract(365, 'day').format('DD-MM-YYYY');
 
       if (lastDate && dayjs(lastDate).isSame(dayjs(), 'day')) {
         backfillStatus.done++;
@@ -304,25 +307,93 @@ async function runBackfill(force = false) {
 }
 
 /**
- * Check if backfill is needed and start in background
+ * checkAndRunBackfill — DISABLED on startup.
+ * Historical data is now fetched on-demand (per symbol, when user clicks it).
+ * This prevents bulk-loading 500+ symbols into MongoDB on every server start.
+ * Use runBackfill(true) manually in admin/CLI contexts if a full seed is needed.
  */
 async function checkAndRunBackfill() {
-  // Check if 1D data exists and is recent
-  const lastCandle = await Candle.findOne({ timeframe: '1D' }).sort({ time: -1 }).lean();
-  const yesterday = dayjs().subtract(1, 'day').startOf('day').valueOf();
-
-  if (!lastCandle || lastCandle.time < yesterday) {
-    console.log('[Backfill] Data missing or stale. Starting backfill in background...');
-    // Run asynchronously — don't block server startup
-    setImmediate(() => runBackfill(false).catch(err => {
-      backfillStatus.error = err.message;
-      backfillStatus.running = false;
-      console.error('[Backfill] Fatal error:', err.message);
-    }));
-  } else {
-    console.log('[Backfill] Data is up to date. Skipping.');
-    backfillStatus.complete = true;
-  }
+  console.log('[Backfill] On-demand mode active — skipping startup bulk backfill.');
+  console.log('[Backfill] Data will be fetched per-symbol when first requested via API.');
+  backfillStatus.complete = true;
 }
 
-module.exports = { checkAndRunBackfill, runBackfill, getStatus };
+/**
+ * On-demand backfill for a single symbol (called when user first opens a chart).
+ * Fetches 5 months of 1D data and caches in MongoDB.
+ * Returns the saved candles immediately so the chart can render.
+ */
+async function runBackfillForSymbol(symbol) {
+  const sym = symbol.toUpperCase();
+  const isIndex = ['NIFTY','BANKNIFTY','SENSEX','NIFTY MIDCAP SELECT'].includes(sym);
+
+  const toDateStr = dayjs().format('DD-MM-YYYY');
+  const lastDate = await getLastSavedDate(sym);
+
+  // Freshness logic (IST-aware):
+  //  - If last candle is TODAY → always fresh, skip fetch
+  //  - If last candle is YESTERDAY → fresh only if current IST time is before 15:31
+  //    (market hasn't closed yet today, so yesterday is the latest available candle)
+  //  - Anything older → stale, fetch incrementally
+  if (lastDate) {
+    const nowIST = dayjs().utcOffset(330); // IST = UTC+5:30
+    const lastDayjs = dayjs(lastDate);
+    const isToday = lastDayjs.isSame(nowIST, 'day');
+    const isYesterday = lastDayjs.isSame(nowIST.subtract(1, 'day'), 'day');
+    const marketClosed = nowIST.hour() > 15 || (nowIST.hour() === 15 && nowIST.minute() >= 31);
+
+    if (isToday || (isYesterday && !marketClosed)) {
+      console.log(`[Backfill] ${sym} already up to date (last: ${lastDayjs.format('DD-MM-YYYY')})`);
+      return await Candle.find({ symbol: sym, timeframe: '1D' }).sort({ time: 1 }).lean();
+    }
+  }
+
+  const fromDate = lastDate
+    ? dayjs(lastDate).add(1, 'day').format('DD-MM-YYYY')
+    : dayjs().subtract(365, 'day').format('DD-MM-YYYY');
+
+  // Full 5-month window — always used when NSE fails so Yahoo fills all missing data
+  const fullFromDate = dayjs().subtract(365, 'day').format('DD-MM-YYYY');
+
+  console.log(`[Backfill] On-demand fetch for ${sym} from ${fromDate} to ${toDateStr}`);
+
+  let candles = [];
+  let nseFailed = false;
+  try {
+    if (isIndex) {
+      const indexNameMap = {
+        'NIFTY': 'NIFTY 50', 'BANKNIFTY': 'NIFTY BANK',
+        'NIFTY MIDCAP SELECT': 'NIFTY MIDCAP SELECT', 'SENSEX': 'SENSEX',
+      };
+      candles = await fetchIndexHistory(indexNameMap[sym] || sym, fromDate, toDateStr);
+    } else {
+      candles = await fetchEquityHistory(sym, fromDate, toDateStr);
+    }
+  } catch (nseErr) {
+    console.warn(`[Backfill] NSE failed for ${sym} (${nseErr.message}), trying Yahoo...`);
+    nseFailed = true;
+  }
+
+  // If NSE failed or returned nothing: Yahoo always fetches the FULL 5-month window,
+  // not just the incremental gap. saveCandles uses upsert so existing records are safe.
+  if (nseFailed || candles.length === 0) {
+    try {
+      candles = await fetchYahooHistory(sym, fullFromDate, toDateStr);
+      if (candles.length) {
+        console.log(`[Backfill] ${sym} — Yahoo returned ${candles.length} candles (full 5-month window)`);
+      }
+    } catch (yahooErr) {
+      console.error(`[Backfill] Yahoo also failed for ${sym}: ${yahooErr.message}`);
+    }
+  }
+
+  if (candles.length) {
+    await saveCandles(candles);
+    console.log(`[Backfill] ${sym} — ${candles.length} candles saved`);
+  }
+
+  // Return all stored candles for this symbol
+  return await Candle.find({ symbol: sym, timeframe: '1D' }).sort({ time: 1 }).lean();
+}
+
+module.exports = { checkAndRunBackfill, runBackfill, runBackfillForSymbol, getStatus };

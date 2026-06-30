@@ -13,12 +13,12 @@ const cron = require('node-cron');
 
 const { initCookies } = require('./cookie');
 const { initPollerSchedule, getOptionChain, getCircuitBreakerSymbols, fetchSnapshotQuote } = require('./poller');
-const { init: initCandle, runCandleBuilder, buildDailyCandles, preloadCandleCache, getCandles, notifyPollerStopped } = require('./candle');
+const { init: initCandle, runCandleBuilder, buildDailyCandles, preloadCandleCache, getCandles, notifyPollerStopped, purgeIntradayCandles, pruneDailyCandles } = require('./candle');
 const { startScanner, getLatestResults, getLatestTick } = require('./scanner');
-const { checkAndRunBackfill, getStatus: getBackfillStatus } = require('./backfill');
+const { checkAndRunBackfill, getStatus: getBackfillStatus, runBackfillForSymbol } = require('./backfill');
 const { NIFTY50_SYMBOLS, NIFTY100_SYMBOLS, NIFTY500_SYMBOLS, FNO_SYMBOLS, INDICES } = require('./symbols');
 const paper = require('./paperTrading');
-const { fetchFromNSE } = require('./historicalFeed');
+const { fetchFromNSE, fetchYahooIntradayForDate } = require('./historicalFeed');
 
 // ─── Express & Socket.IO Setup ─────────────────────────────────────────────
 const app = express();
@@ -176,6 +176,61 @@ app.get('/api/quote/:symbol', async (req, res) => {
   res.status(404).json({ error: 'No tick data available' });
 });
 
+// Drill-down: intraday candles for a specific past date (History Mode).
+// Called when user clicks a candle on the 1D chart to drill into that day.
+// date param: YYYY-MM-DD   timeframe: 5min | 15min | 1hr
+// For today → serves live candles. For past days → fetches from Yahoo.
+app.get('/api/drilldown/:symbol/:timeframe', async (req, res) => {
+  try {
+    const { symbol, timeframe } = req.params;
+    const date = req.query.date; // YYYY-MM-DD
+    if (!date) return res.status(400).json({ error: 'date query param required (YYYY-MM-DD)' });
+
+    const sym = symbol.toUpperCase();
+    const INTRADAY = ['1min', '5min', '15min', '1hr'];
+    if (!INTRADAY.includes(timeframe)) {
+      return res.status(400).json({ error: 'timeframe must be one of: 1min, 5min, 15min, 1hr' });
+    }
+
+    // Check if requested date is today (IST)
+    const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const todayStr = `${nowIST.getFullYear()}-${String(nowIST.getMonth()+1).padStart(2,'0')}-${String(nowIST.getDate()).padStart(2,'0')}`;
+
+    if (date === todayStr) {
+      // Today → serve from live MongoDB/Redis candles
+      let candles = await getCandles(sym, timeframe, 400);
+      const todayIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      todayIST.setHours(0, 0, 0, 0);
+      candles = candles.filter(c => c.time >= todayIST.getTime());
+      if (!candles.length) {
+        try { candles = await fetchFromNSE(sym, timeframe, 400); } catch {}
+      }
+      return res.json({ symbol: sym, timeframe, date, candles, isToday: true });
+    }
+
+    // Past date → fetch from Yahoo for that exact session
+    console.log(`[Drilldown] ${sym} ${timeframe} for ${date}`);
+    const candles = await fetchYahooIntradayForDate(sym, date, timeframe);
+    res.json({ symbol: sym, timeframe, date, candles, isToday: false });
+  } catch (err) {
+    console.error('[Drilldown] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// On-demand historical data: fetches 5 months of 1D candles for a symbol
+// and caches them in MongoDB. Called when user first clicks a stock.
+// Subsequent calls return from cache (no re-fetch within 1 trading day).
+app.get('/api/history/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const candles = await runBackfillForSymbol(symbol);
+    res.json({ symbol, candles });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Backfill status
 app.get('/api/backfill/status', (req, res) => {
   res.json(getBackfillStatus());
@@ -326,6 +381,49 @@ async function bootstrap() {
       console.error('[CandleBuilder] Error:', err.message)
     );
   }, 60000);
+
+  // ── EOD Market Close Jobs (IST) ─────────────────────────────────────────────
+  // 15:25 IST — Square off all open MIS positions before exchange forcefully closes them
+  cron.schedule('25 15 * * 1-5', async () => {
+    console.log('[EOD] 15:25 IST — Auto square-off of open MIS positions...');
+    try {
+      const result = await paper.squareOffAllMIS(resolveLTP);
+      io.emit('eodSquareOff', {
+        message: `Market closing: ${result.squaredOff} MIS position(s) squared off`,
+        squaredOff: result.squaredOff,
+        totalPnL: result.totalPnL,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error('[EOD] Square-off failed:', err.message);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+
+  // 15:35 IST — After 1D candles are built, purge intraday candles from MongoDB
+  // Redis ticks have their own 86400s TTL set in poller, so we only clean Mongo here.
+  cron.schedule('35 15 * * 1-5', async () => {
+    console.log('[EOD] 15:35 IST — Purging intraday candles from MongoDB...');
+    try {
+      await purgeIntradayCandles();
+      // Prune daily candles to keep only last 150 per symbol (prevent growth over time)
+      const allSymbols = [...new Set([...NIFTY500_SYMBOLS, ...FNO_SYMBOLS, ...INDICES])];
+      await pruneDailyCandles(allSymbols);
+    } catch (err) {
+      console.error('[EOD] Intraday purge failed:', err.message);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+
+  // Reset dayPnL at midnight every day
+  cron.schedule('0 0 * * *', async () => {
+    try {
+      const mongoose = require('mongoose');
+      const Account = mongoose.model('PaperAccount');
+      await Account.updateMany({}, { $set: { dayPnL: 0 } });
+      console.log('[EOD] dayPnL reset for all accounts');
+    } catch (err) {
+      console.error('[EOD] dayPnL reset failed:', err.message);
+    }
+  }, { timezone: 'Asia/Kolkata' });
 
   // Check and run backfill (background, non-blocking)
   setTimeout(() => checkAndRunBackfill(), 5000);
